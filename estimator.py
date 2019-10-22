@@ -144,8 +144,34 @@ class Model(object):
     def __call__(self, inputs):
         #with tf.variable_scope("lstm_embedding", reuse=tf.AUTO_REUSE):
         with tf.variable_scope("lstm_embedding"):
-            stacked_lstm = tf.nn.rnn_cell.MultiRNNCell([tf.nn.rnn_cell.LSTMCell(self.hparams.num_lstm_cells, num_proj=self.hparams.dim_lstm_projection) for _ in range(self.hparams.num_lstm_stacks)])
-            outputs, state = tf.nn.dynamic_rnn(cell=stacked_lstm, inputs=inputs, dtype=tf.float32)
+            cell_1 = tf.contrib.cudnn_rnn.CudnnLSTM(num_layers=1, num_units=self.hparams.num_lstm_cells, name="cell_1")
+            output_1, state_1 = cell_1(inputs)
+            proj_weight_1 = tf.get_variable(name="proj_w_1",
+                                            shape=[self.hparams.num_lstm_cells, self.hparams.dim_lstm_projection])
+
+            expand_proj_weight_1 = tf.tile(tf.expand_dims(proj_weight_1, 0), [self.batch_size, 1, 1])
+
+            proj_output_1 = tf.matmul(output_1, expand_proj_weight_1)
+
+            cell_2 = tf.contrib.cudnn_rnn.CudnnLSTM(num_layers=1, num_units=self.hparams.num_lstm_cells, name="cell_2")
+            output_2, state_2 = cell_2(proj_output_1)
+            proj_weight_2 = tf.get_variable(name="proj_w_2",
+                                            shape=[self.hparams.num_lstm_cells, self.hparams.dim_lstm_projection])
+
+            expand_proj_weight_2 = tf.tile(tf.expand_dims(proj_weight_2, 0), [self.batch_size, 1, 1])
+
+            proj_output_2 = tf.matmul(output_2, expand_proj_weight_2)
+
+            cell_3 = tf.contrib.cudnn_rnn.CudnnLSTM(num_layers=1, num_units=self.hparams.num_lstm_cells, name="cell_3")
+
+            output_3, state_3 = cell_3(proj_output_2)
+            proj_weight_3 = tf.get_variable(name="proj_w_3",
+                                            shape=[self.hparams.num_lstm_cells, self.hparams.dim_lstm_projection])
+            expand_proj_weight_3 = tf.tile(tf.expand_dims(proj_weight_3, 0), [self.batch_size, 1, 1])
+            proj_output_3 = tf.matmul(output_3, expand_proj_weight_3)
+
+            outputs = proj_output_3
+
             self.norm_out = tf.nn.l2_normalize(outputs[:, -1, :], axis=-1)
             return self.norm_out
 
@@ -365,9 +391,11 @@ class Trainer:
                 #input_batch = tf.placeholder(dtype=tf.float32, shape=[None, None, self.hparams.spectrogram_scale], name="input_batch")
                 #target_batch = tf.placeholder(dtype=tf.int32, shape=[None], name="target_batch")
 
+                num_utt_per_batch = tf.constant(value=self.hparams.num_utt_per_batch, dtype=tf.int32, shape=[])
+
                 model=Model(self.hparams)
                 norm_out=model(features)
-                total_loss, total_loss_summary=self._cal_loss(norm_out, labels)
+                total_loss, total_loss_summary=self._cal_loss(norm_out, labels, num_utt_per_batch)
                 train_op, clipped_grad_and_vars=self._optimize(total_loss)
                 grad_norms=[tf.norm(grad_and_var[0]) for grad_and_var in clipped_grad_and_vars if grad_and_var[0] is not None]
                 tf.summary.histogram('gradient_norm', grad_norms)
@@ -408,24 +436,26 @@ class Trainer:
                     return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions, prediction_hooks=predict_hook_list)
         return model_fn
 
-    def _cal_loss(self, norm_out, labels):
+    def _cal_loss(self, norm_out, labels, num_utt_per_batch):
         def _cal_centroid_matrix(utt_idx):
             # centroid_idx counts from 0 to 63
             # spk_id is this utt's spkid
             def cal_centroid(centroid_idx):
-                # utt_idx counts from 0 to 639
-                # spk_id counts from 0 to 63
-                spk_id = (utt_idx // self.hparams.num_utt_per_batch)
-                utt_idx_in_group = utt_idx % self.hparams.num_utt_per_batch
+
+                spk_id = (utt_idx // num_utt_per_batch)
+                utt_idx_in_group = utt_idx % num_utt_per_batch
 
                 # [10, 256]
-                all_utts_for_spk = norm_out[centroid_idx * self.hparams.num_utt_per_batch : (centroid_idx+1) * self.hparams.num_utt_per_batch, :]
-                if centroid_idx == spk_id:
-                    # [10] one cold
-                    mask = np.array([False if utt == utt_idx_in_group else True for utt in range(self.hparams.num_utt_per_batch)])
-                    centroid = tf.reduce_mean(tf.boolean_mask(all_utts_for_spk, mask), 0)
-                else:
-                    centroid = tf.reduce_mean(all_utts_for_spk, 0)
+                all_utts_for_spk = \
+                    norm_out[centroid_idx * num_utt_per_batch: (centroid_idx + 1) * num_utt_per_batch, :]
+
+                expand_utt_idx_in_group = tf.tile(tf.expand_dims(utt_idx_in_group, axis=0), [num_utt_per_batch])
+
+                tf_mask = tf.not_equal(expand_utt_idx_in_group, tf.range(num_utt_per_batch))
+                centroid = \
+                    tf.cond(tf.equal(centroid_idx, spk_id),
+                            lambda: tf.reduce_mean(tf.boolean_mask(all_utts_for_spk, tf_mask), 0),
+                            lambda: tf.reduce_mean(all_utts_for_spk, 0))
 
                 return centroid
 
