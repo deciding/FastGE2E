@@ -11,11 +11,33 @@ import pickle
 import argparse
 from glob import glob
 from tqdm import tqdm
+from tfrecord_producer import decode_single_preprocessed_data
+#import horovod.tensorflow as hvd
 
 single_predict=False
 
 #python estimator.py --in_dir ../datasets/tisv_pickles/ --ckpt test/ --gpu_str 4
 #python estimator.py --in_dir ../experiments/unseen/ --out_dir new-spkid --ckpt test/ --gpu_str 7 --mode infer
+
+import pdb
+import sys
+class ForkablePdb(pdb.Pdb):
+
+    _original_stdin_fd = sys.stdin.fileno()
+    _original_stdin = None
+
+    def __init__(self):
+        pdb.Pdb.__init__(self, nosigint=True)
+
+    def _cmdloop(self):
+        current_stdin = sys.stdin
+        try:
+            if not self._original_stdin:
+                self._original_stdin = os.fdopen(self._original_stdin_fd)
+            sys.stdin = self._original_stdin
+            self.cmdloop()
+        finally:
+            sys.stdin = current_stdin
 
 from tensorflow.python.training import session_run_hook
 from tensorflow.python.training.summary_io import SummaryWriterCache
@@ -34,7 +56,7 @@ class TxtProfilerHook(session_run_hook.SessionRunHook):
   def __init__(self, graph,
                save_steps=None,
                save_secs=None,
-               output_dir=""):
+               output_dir="", suffix=""):
     """Initializes a hook that takes periodic profiling snapshots.
     `options.run_metadata` argument of `tf.Session.Run` is used to collect
     metadata about execution. This hook sets the metadata and dumps it in Chrome
@@ -46,16 +68,19 @@ class TxtProfilerHook(session_run_hook.SessionRunHook):
       output_dir: `string`, the directory to save the profile traces to.
           Defaults to the current directory.
     """
-    self._output_file = os.path.join(output_dir, "profile-{}.txt")
+    self._output_file = os.path.join(output_dir, "profile-{}-{}.txt")
+    self._suffix = suffix
     self._file_writer = SummaryWriterCache.get(output_dir)
     self._timer = tf.train.SecondOrStepTimer(
         every_secs=save_secs, every_steps=save_steps)
     self._profiler = model_analyzer.Profiler(graph=graph)
     profile_op_builder = option_builder.ProfileOptionBuilder( )
-    # sort by time taken
-    profile_op_builder.select(['micros', 'occurrence'])
-    profile_op_builder.order_by('micros')
-    profile_op_builder.with_max_depth(20) # can be any large number
+    ## sort by time taken
+    #profile_op_builder.select(['micros', 'occurrence'])
+    #profile_op_builder.order_by('micros')
+    profile_op_builder.select(['bytes'])
+    profile_op_builder.order_by('bytes')
+    profile_op_builder.with_max_depth(10) # can be any large number
     self._profile_op_builder = profile_op_builder
 
   def begin(self):
@@ -85,7 +110,7 @@ class TxtProfilerHook(session_run_hook.SessionRunHook):
       global_step = run_context.session.run(self._global_step_tensor)
       self._timer.update_last_triggered_step(global_step)
       self._profiler.add_step(step=int(global_step), run_meta=run_values.run_metadata)
-      self._profile_op_builder.with_file_output(self._output_file.format(int(global_step))) # can be any large number
+      self._profile_op_builder.with_file_output(self._output_file.format(int(global_step), self._suffix)) # can be any large number
       self._profiler.profile_name_scope(self._profile_op_builder.build())
 
     self._next_step = global_step + 1
@@ -131,7 +156,7 @@ def tf_scaled_cosine_similarity(a, b):
 
 def read_pickles(num_utt_per_batch, data_type, pickles, spk_id):
     spk_utt = [pkl for pkl in pickles if re.search(spk_id+'_', pkl)]
-    if len(spk_utt) > num_utt_per_batch:
+    if len(spk_utt) >= num_utt_per_batch:
         return (spk_id, spk_utt)
     else:
         return None
@@ -171,6 +196,7 @@ class Trainer:
     def get_input_fn(self, wav_files=None):
         def map_py(spk_ids, data_types): # 640 batch
             in_batch=[]
+            #print("=====spkid=====", spk_ids)# check the dataset randomness for different gpus
             for spk_id, data_type in zip(spk_ids, data_types):
                 spk_id=spk_id.decode()
                 data_type=data_type.decode()
@@ -284,52 +310,66 @@ class Trainer:
             target_batch = tf.reshape(target_batch, [self.gpu_num * self.batch_size])
             return tuple([in_batch, target_batch])
 
+        def tfrecord_map_fn(t):
+            t=decode_single_preprocessed_data(t)
+            return t
+
         def input_fn():
             if self.hparams.mode == 'train':
                 spk_names=[]
                 data_types=[]
                 self.spk_dicts={}
 
-                if self.hparams.pickle_dataset:
-                    from concurrent.futures import ProcessPoolExecutor
-                    from functools import partial
-                    #from tqdm import tqdm
-                    executor = ProcessPoolExecutor(max_workers=40)
+                if not self.hparams.tfrecord:
+                    if self.hparams.pickle_dataset:
+                        from concurrent.futures import ProcessPoolExecutor
+                        from functools import partial
+                        #from tqdm import tqdm
+                        executor = ProcessPoolExecutor(max_workers=40)
 
-                    for data_type in self.hparams.data_types:
-                        futures_tuples=[]
-                        futures=[]
-                        pickles = os.listdir(self.hparams.in_dir + "/" + data_type)
-                        cur_spk_names = list(set([pkl.split("_")[0] for pkl in pickles]))
-                        for spk_id in tqdm(cur_spk_names):
-                            futures.append(executor.submit(partial(
-                                read_pickles, self.hparams.num_utt_per_batch, data_type, pickles, spk_id)))
-                        futures_tuples=[future.result() for future in tqdm(futures) if future.result() is not None]
-                        cur_spk_names=[item[0] for item in futures_tuples]
-                        cur_data_types=[data_type] * len(cur_spk_names)
-                        spk_names+=cur_spk_names
-                        data_types+=cur_data_types
-                        self.spk_dicts[data_type]={item[0]:item[1] for item in futures_tuples}
+                        for data_type in self.hparams.data_types:
+                            futures_tuples=[]
+                            futures=[]
+                            pickles = os.listdir(self.hparams.in_dir + "/" + data_type)
+                            cur_spk_names = list(set([pkl.split("_")[0] for pkl in pickles]))
+                            for spk_id in tqdm(cur_spk_names):
+                                futures.append(executor.submit(partial(
+                                    read_pickles, self.hparams.num_utt_per_batch, data_type, pickles, spk_id)))
+                            futures_tuples=[future.result() for future in tqdm(futures) if future.result() is not None]
+                            cur_spk_names=[item[0] for item in futures_tuples]
+                            cur_data_types=[data_type] * len(cur_spk_names)
+                            spk_names+=cur_spk_names
+                            data_types+=cur_data_types
+                            self.spk_dicts[data_type]={item[0]:item[1] for item in futures_tuples}
 
-                    pickle.dump(spk_names, open("spk_names.pickle", "wb"))
-                    pickle.dump(data_types, open("data_types.pickle", "wb"))
-                    pickle.dump(self.spk_dicts, open("spk_dicts.pickle", "wb"))
+                        pickle.dump(spk_names, open("spk_names.pickle", "wb"))
+                        pickle.dump(data_types, open("data_types.pickle", "wb"))
+                        pickle.dump(self.spk_dicts, open("spk_dicts.pickle", "wb"))
+                    else:
+                        print("Shuffling input data")
+                        spk_names=pickle.load(open("spk_names.pickle", "rb"))
+                        data_types=pickle.load(open("data_types.pickle", "rb"))
+                        combined = list(zip(spk_names, data_types))
+                        random.shuffle(combined)
+                        spk_names, data_types = zip(*combined)
+                        spk_names=list(spk_names)
+                        data_types=list(data_types)
+                        self.spk_dicts=pickle.load(open("spk_dicts.pickle", "rb"))
+                        print("Done shuffling")
+
+                    dataset = tf.data.Dataset.from_tensor_slices((spk_names, data_types))
+                    dataset = dataset.repeat()
+                    dataset = dataset.batch(self.gpu_num * self.hparams.num_spk_per_batch) # .repeat will not solve remainder if putting after .batch
+                    dataset = dataset.map(map_fn, num_parallel_calls=40)
+                    dataset.prefetch(4)
+                # tfrecord
                 else:
-                    print("Shuffling input data")
-                    spk_names=pickle.load(open("spk_names.pickle", "rb"))
-                    data_types=pickle.load(open("data_types.pickle", "rb"))
-                    combined = list(zip(spk_names, data_types))
-                    random.shuffle(combined)
-                    spk_names, data_types = zip(*combined)
-                    spk_names=list(spk_names)
-                    data_types=list(data_types)
-                    self.spk_dicts=pickle.load(open("spk_dicts.pickle", "rb"))
-                    print("Done shuffling")
+                    #TODO
+                    dataset = tf.data.TFRecordDataset(self.hparams.in_dir)
+                    dataset = dataset.repeat()
+                    dataset = dataset.batch(self.gpu_num * self.hparams.num_spk_per_batch)
+                    dataset = dataset.map(tfrecord_map_fn)
 
-                dataset = tf.data.Dataset.from_tensor_slices((spk_names, data_types))
-                dataset = dataset.repeat()
-                dataset = dataset.batch(self.gpu_num * self.hparams.num_spk_per_batch) # .repeat will not solve remainder if putting after .batch
-                dataset = dataset.map(map_fn)
                 return dataset
 
             elif self.hparams.mode == 'infer':
@@ -367,22 +407,35 @@ class Trainer:
 
                 model=Model(self.hparams)
                 norm_out=model(features)
+                #print_dim=tf.print('=====norm shape=====', tf.shape(norm_out))
+                #with tf.control_dependencies([print_dim]):
                 total_loss, total_loss_summary=self._cal_loss(norm_out, labels)
+                #total_loss, total_loss_summary=self._efficient_cal_loss(norm_out, labels)
                 train_op, clipped_grad_and_vars=self._optimize(total_loss)
                 grad_norms=[tf.norm(grad_and_var[0]) for grad_and_var in clipped_grad_and_vars if grad_and_var[0] is not None]
                 tf.summary.histogram('gradient_norm', grad_norms)
                 all_summary=tf.summary.merge_all()
-                train_hook_list= []
+                train_hook_list = []
                 train_tensors_log = {'loss': total_loss,
                                      'global_step': self.global_step}
                 checkpoint_hook = tf.train.CheckpointSaverHook(self.hparams.ckpt_dir, save_steps=self.hparams.checkpoint_freq)
                 summary_hook = tf.train.SummarySaverHook(save_steps=self.hparams.summary_freq, output_dir=self.hparams.ckpt_dir, summary_op=all_summary)
-                #profile_hook = TxtProfilerHook(tf.get_default_graph(), save_steps=self.hparams.profile_freq, output_dir=self.hparams.ckpt_dir)
+                #profile_hook = TxtProfilerHook(tf.get_default_graph(), save_steps=self.hparams.profile_freq, output_dir=self.hparams.ckpt_dir, suffix=hvd.rank() if self.hparams.use_horovod else 0)
+                #timeline_hook = tf.train.ProfilerHook(save_steps=5, show_memory=True)
+
+                # Horovod: BroadcastGlobalVariablesHook broadcasts initial variable states from
+                # rank 0 to all other processes. This is necessary to ensure consistent
+                # initialization of all workers when training is started with random weights or
+                # restored from a checkpoint.
                 train_hook_list.append(tf.train.LoggingTensorHook(
                             tensors=train_tensors_log, every_n_iter=1))
-                train_hook_list.append(checkpoint_hook)
-                train_hook_list.append(summary_hook)
+                if not self.hparams.use_horovod or hvd.rank()==0:
+                    train_hook_list.append(checkpoint_hook)
+                    #train_hook_list.append(timeline_hook)
                 #train_hook_list.append(profile_hook)
+                train_hook_list.append(summary_hook)
+                if self.hparams.use_horovod:
+                    train_hook_list.append(hvd.BroadcastGlobalVariablesHook(0))
                 print("Model build")
                 return tf.estimator.EstimatorSpec(mode=mode, loss=total_loss,
                                                       train_op=train_op, training_hooks=train_hook_list)
@@ -407,6 +460,90 @@ class Trainer:
                     #            tensors=predict_tensors_log, every_n_iter=1))
                     return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions, prediction_hooks=predict_hook_list)
         return model_fn
+
+    # 1. calc centroids
+    # 2. tile centroids from 64 to 640
+    # 3. minus utt and scale to get the CHANGED centroid that specidif to each utt
+    # 4. normalize utt and centroids and changed centroids
+    # 5. utt 640 pointwise mul changed centroids 640, and sum, get changed cos
+    # 6. utt 640 matmul centroids 64, get 640*64 cos
+    # 7. manipulate matrix to get the changed cos 640*64 and mask
+    # 8. combine cos and changed cos
+    def _efficient_cal_loss(self, norm_out, labels):
+        with tf.variable_scope("loss"):
+            if self.hparams.loss_type == "softmax":
+                # sim_mat has shape of [self.batch_size, num_spk] [640, 64]
+                with tf.variable_scope("cos_params", reuse=tf.AUTO_REUSE):
+                    w = tf.Variable(10.0, name="scale_weight")
+                    bias = tf.Variable(-5.0, name="scale_bias")
+                    w=tf.clip_by_value(w, 0.0, 1000.0)
+
+                #1,2 
+                def get_centroid_transform():
+                    mat=np.zeros((self.hparams.num_spk_per_batch, self.hparams.num_spk_per_batch*self.hparams.num_utt_per_batch))
+                    for i in range(self.hparams.num_spk_per_batch):
+                        for j in range(self.hparams.num_utt_per_batch):
+                            mat[i][i*self.hparams.num_utt_per_batch+j]=1/self.hparams.num_utt_per_batch
+                    return tf.convert_to_tensor(mat, dtype=tf.float32)
+
+                def get_changed_centroid_transform():
+                    mat=np.zeros((self.hparams.num_spk_per_batch*self.hparams.num_utt_per_batch, self.hparams.num_spk_per_batch*self.hparams.num_utt_per_batch))
+                    for i in range(self.hparams.num_spk_per_batch):
+                        for ii in range(self.hparams.num_utt_per_batch):
+                            for j in range(self.hparams.num_utt_per_batch):
+                                mat[i*self.hparams.num_utt_per_batch+ii][i*self.hparams.num_utt_per_batch+j]=1/self.hparams.num_utt_per_batch
+                    return tf.convert_to_tensor(mat, dtype=tf.float32)
+
+                centroid_transform=get_centroid_transform()
+                changed_centroid_transform=get_changed_centroid_transform()
+                centroids=tf.matmul(centroid_transform, norm_out)
+                changed_centroids=tf.matmul(changed_centroid_transform, norm_out)
+
+                #def cal_centroid_matrix():
+                #    # centroid_idx counts from 0 to 63
+                #    def cal_centroid(centroid_idx):
+                #        # [10, 256]
+                #        all_utts_for_spk = norm_out[centroid_idx * self.hparams.num_utt_per_batch : (centroid_idx+1) * self.hparams.num_utt_per_batch, :]
+                #        centroid = tf.reduce_mean(all_utts_for_spk, 0)
+
+                #        return centroid
+
+                #    # [64, 256], the centroid for utt_idx will not count utt_idx
+                #    centroid_mat_stack=[]
+                #    changed_centroid_mat_stack=[]
+                #    for i in range(self.hparams.num_spk_per_batch):
+                #        cur_centroid=cal_centroid(i)
+                #        centroid_mat_stack.append(cur_centroid)
+                #        changed_centroid_mat_stack+=([cur_centroid]*self.hparams.num_utt_per_batch)
+                #    centroid_mat = tf.stack(centroid_mat_stack, axis=0)
+                #    changed_centroid_mat = tf.stack(changed_centroid_mat_stack, axis=0)
+
+                #    return centroid_mat, changed_centroid_mat
+                #centroids, changed_centroids = cal_centroid_matrix()
+                #3
+                changed_centroids = (changed_centroids*self.hparams.num_utt_per_batch - norm_out)/(self.hparams.num_utt_per_batch-1)
+                #4
+                norm_centroids=tf.nn.l2_normalize(centroids, axis=-1)
+                norm_changed_centroids=tf.nn.l2_normalize(changed_centroids, axis=-1)
+                #5,6
+                utt_cos=tf.add(tf.multiply(w, tf.matmul(norm_out, norm_centroids, transpose_b=True)), bias)# [640, 64]
+                changed_utt_cos=tf.add(tf.multiply(w, tf.reduce_sum(tf.multiply(norm_out, norm_changed_centroids), axis=-1)), bias)# [640]
+                #7
+                def get_pos_mask():
+                    mask=np.zeros((self.hparams.num_spk_per_batch*self.hparams.num_utt_per_batch, self.hparams.num_spk_per_batch))
+                    for i in range(self.hparams.num_spk_per_batch):
+                        for j in range(self.hparams.num_utt_per_batch):
+                            mask[i*self.hparams.num_utt_per_batch+j][i]=1
+                    return tf.convert_to_tensor(mask, dtype=tf.float32)
+
+                pos_mask=get_pos_mask()
+                neg_mask=tf.ones_like(pos_mask)-pos_mask
+                final_utt_cos=tf.multiply(pos_mask, tf.expand_dims(changed_utt_cos, -1))+tf.multiply(neg_mask, utt_cos)
+                # tf.nn.spase_softmax_cross_entropy_with_logits [640, 64] [640]
+                total_loss = tf.divide(tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=final_utt_cos, labels=labels)), self.batch_size)
+                total_loss_summary = tf.summary.scalar("loss", total_loss)
+                return (total_loss, total_loss_summary)
+        pass
 
     def _cal_loss(self, norm_out, labels):
         def _cal_centroid_matrix(utt_idx):
@@ -487,7 +624,8 @@ class Trainer:
             self.global_step = tf.train.get_or_create_global_step()
             learning_rate = tf.train.exponential_decay(self.hparams.learning_rate, self.global_step,
                                        30000000, 0.5, staircase=True)
-            optimizer = tf.train.GradientDescentOptimizer(learning_rate)
+            optimizer = tf.train.GradientDescentOptimizer(learning_rate * hvd.size() if self.hparams.use_horovod else learning_rate)
+            optimizer = hvd.DistributedOptimizer(optimizer) if self.hparams.use_horovod else optimizer
             #optimizer = tf.contrib.estimator.TowerOptimizer(optimizer)
             grads_and_vars = optimizer.compute_gradients(total_loss)
 
@@ -504,6 +642,9 @@ class Trainer:
                 clipped_grad_and_vars.append((grad, var))
 
             train_op = optimizer.apply_gradients(clipped_grad_and_vars, global_step=self.global_step)
+            #print("=====clipped grads=====")
+            #for grad_var in clipped_grad_and_vars:
+            #    print("%s %s \n" % (grad_var[0].name, grad_var[1].name), end='')
             return train_op, clipped_grad_and_vars
 
     def train(self):
@@ -515,10 +656,20 @@ class Trainer:
 
         #tts=tf.estimator.Estimator(model_fn=tf.contrib.estimator.replicate_model_fn(self.get_model_fn()), model_dir=self.hparams.ckpt_dir)
 
-        tts=tf.estimator.Estimator(model_fn=self.get_model_fn(), model_dir=self.hparams.ckpt_dir)
+        #strategy = tf.contrib.distribute.OneDeviceStrategy(device='/gpu:0')
+        #config = tf.estimator.RunConfig(train_distribute=strategy)
+
+        # Horovod: pin GPU to be used to process local rank (one GPU per process)
+        config = tf.ConfigProto()
+        if self.hparams.use_horovod:
+            config.gpu_options.allow_growth = True
+            config.gpu_options.visible_device_list = str(hvd.local_rank())
+        model_dir=self.hparams.ckpt_dir if not self.hparams.use_horovod or hvd.rank() == 0 else None
+
+        tts=tf.estimator.Estimator(model_fn=self.get_model_fn(), model_dir=model_dir, config=tf.estimator.RunConfig(session_config=config))
         print("Start to train")
         #with tf.contrib.tfprof.ProfileContext(self.hparams.ckpt_dir, dump_steps=[10]): # Core dump error
-        tts.train(input_fn=self.get_input_fn(), max_steps=self.hparams.max_steps)
+        tts.train(input_fn=self.get_input_fn(), max_steps=self.hparams.max_steps//(hvd.size() if self.hparams.use_horovod else 1))
 
     def predict(self):
         self.wav_list=glob('%s/*/Wave/*.wav' % self.hparams.in_dir)
@@ -568,13 +719,15 @@ parser.add_argument('--data_types', nargs='+', default=['libri', 'vox1', 'vox2']
 parser.add_argument('--pickle_dataset', action='store_true')
 parser.add_argument('--gpu_str', default='0',
                     help='Path to model checkpoint')
+parser.add_argument('--tfrecord', action='store_true', help='whether to read from tfrecord')
+parser.add_argument('--use_horovod', action='store_true', help='whether to use horovod')
 
 # Saving Checkpoints, Data... etc
 parser.add_argument("--max_steps", type=int, default=5000000, help="maximum steps in training")
 parser.add_argument("--checkpoint_freq", type=int, default=10000, help="how often save checkpoint")
 parser.add_argument("--eval_freq", type=int, default=1000, help="how often do the evaluation")
 parser.add_argument("--summary_freq", type=int, default=100, help="maximum steps in training")
-parser.add_argument("--profile_freq", type=int, default=10, help="maximum steps in training")
+parser.add_argument("--profile_freq", type=int, default=3, help="maximum steps in training")
 
 # Data
 parser.add_argument("--segment_length", type=float, default=1.6, help="segment length in seconds")
@@ -610,11 +763,16 @@ parser.add_argument("--overlap_ratio", type=float, default=0.5, help="overlaping
 
 # Collect hparams
 args = parser.parse_args()
-os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"   # see issue #152
-os.environ["CUDA_VISIBLE_DEVICES"]=str(args.gpu_str)
+
+if not args.use_horovod:
+    os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"   # see issue #152
+    os.environ["CUDA_VISIBLE_DEVICES"]=str(args.gpu_str)
 
 if __name__ == "__main__":
+    if args.use_horovod:
+        hvd.init()
     tf.logging.set_verbosity(tf.logging.INFO)
+    random.seed(1234 + (hvd.rank() if args.use_horovod else 0))
     trainer=Trainer(args)
     if args.mode == 'train':
         trainer.train()
