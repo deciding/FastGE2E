@@ -12,7 +12,7 @@ import argparse
 from glob import glob
 from tqdm import tqdm
 from tfrecord_producer import decode_single_preprocessed_data
-#import horovod.tensorflow as hvd
+import horovod.tensorflow as hvd
 
 single_predict=False
 
