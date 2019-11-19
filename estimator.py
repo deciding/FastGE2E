@@ -12,12 +12,12 @@ import argparse
 from glob import glob
 from tqdm import tqdm
 from tfrecord_producer import decode_single_preprocessed_data
-import horovod.tensorflow as hvd
+#import horovod.tensorflow as hvd
 
 single_predict=False
 
 #python estimator.py --in_dir ../datasets/tisv_pickles/ --ckpt test/ --gpu_str 4
-#python estimator.py --in_dir ../experiments/unseen/ --out_dir new-spkid --ckpt test/ --gpu_str 7 --mode infer
+#python estimator.py --in_dir ../datasets/raw_vox/vox1/test/wav --out_dir new-spkid --ckpt fastmodel/ --gpu_str 8 --mode infer
 
 import pdb
 import sys
@@ -409,8 +409,8 @@ class Trainer:
                 norm_out=model(features)
                 #print_dim=tf.print('=====norm shape=====', tf.shape(norm_out))
                 #with tf.control_dependencies([print_dim]):
-                total_loss, total_loss_summary=self._cal_loss(norm_out, labels)
-                #total_loss, total_loss_summary=self._efficient_cal_loss(norm_out, labels)
+                #total_loss, total_loss_summary=self._cal_loss(norm_out, labels)
+                total_loss, total_loss_summary=self._efficient_cal_loss(norm_out, labels)
                 train_op, clipped_grad_and_vars=self._optimize(total_loss)
                 grad_norms=[tf.norm(grad_and_var[0]) for grad_and_var in clipped_grad_and_vars if grad_and_var[0] is not None]
                 tf.summary.histogram('gradient_norm', grad_norms)
@@ -661,8 +661,8 @@ class Trainer:
 
         # Horovod: pin GPU to be used to process local rank (one GPU per process)
         config = tf.ConfigProto()
+        config.gpu_options.allow_growth = True
         if self.hparams.use_horovod:
-            config.gpu_options.allow_growth = True
             config.gpu_options.visible_device_list = str(hvd.local_rank())
         model_dir=self.hparams.ckpt_dir if not self.hparams.use_horovod or hvd.rank() == 0 else None
 
@@ -672,7 +672,8 @@ class Trainer:
         tts.train(input_fn=self.get_input_fn(), max_steps=self.hparams.max_steps//(hvd.size() if self.hparams.use_horovod else 1))
 
     def predict(self):
-        self.wav_list=glob('%s/*/Wave/*.wav' % self.hparams.in_dir)
+        #self.wav_list=glob('%s/*/Wave/*.wav' % self.hparams.in_dir)
+        self.wav_list=glob('%s/**/*.wav' % self.hparams.in_dir, recursive=True)
         tts=tf.estimator.Estimator(model_fn=self.get_model_fn(), model_dir=self.hparams.ckpt_dir)
         print("Start predicing")
         #===== single file per predict=====
@@ -745,7 +746,7 @@ parser.add_argument("--learning_rate", type=float, default=0.01, help="learning 
 parser.add_argument("--l2_norm_clip", type=float, default=3.0, help="L2-norm of gradient is clipped at")
 
 # Train
-parser.add_argument("--num_spk_per_batch", type=int, default= 16,
+parser.add_argument("--num_spk_per_batch", type=int, default= 64,
                                        help="N speakers of batch size N*M")
 parser.add_argument("--num_utt_per_batch", type=int, default= 10,
                                        help="M utterances of batch size N*M")

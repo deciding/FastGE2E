@@ -2,9 +2,16 @@ import numpy as np
 from glob import glob
 import argparse
 from tqdm import tqdm
+from numpy import dot
+from numpy.linalg import norm
 
-cmp_flag=False
-if cmp_flag:
+# python npy_cmp.py --in_dir new-spkid/ --test_list test_metas/veri_test2.txt
+# compare whether the two way(parallel) of generating spkid will produce the same result
+mode='old'
+def cos_sim(a, b):
+    return dot(a, b) / (norm(a) * norm(b))
+
+if mode=='compare':
     parser = argparse.ArgumentParser()
     parser.add_argument("--in_dir", type=str, required=True, help="input dir")
     parser.add_argument("--out_dir", type=str, required=True, help="out dir")
@@ -24,42 +31,63 @@ if cmp_flag:
         print(mse, '           ', infile)
     exit()
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--in_dir", type=str, required=True, help="input dir")
-args = parser.parse_args()
+if mode=='old':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--in_dir", type=str, required=True, help="input dir")
+    args = parser.parse_args()
 
-in_dir=args.in_dir
+    in_dir=args.in_dir
 
-spk_dirs=glob('%s/*' % in_dir)
+    spk_dirs=glob('%s/*' % in_dir)
 
-all_spkids=[]
-for spk_dir in spk_dirs:
-    cur_spkids=[]
-    wav_spkid_npys=glob('%s/*.npy' % spk_dir)
-    for wav_spkid_npy in wav_spkid_npys:
-        wav_spkid=np.load(wav_spkid_npy)
-        cur_spkids.append(wav_spkid)
-    all_spkids.append(cur_spkids)
+    all_spkids=[]
+    for spk_dir in spk_dirs:
+        cur_spkids=[]
+        wav_spkid_npys=glob('%s/*.npy' % spk_dir)
+        for wav_spkid_npy in wav_spkid_npys:
+            wav_spkid=np.load(wav_spkid_npy)
+            cur_spkids.append(wav_spkid)
+        all_spkids.append(cur_spkids)
 
-from numpy import dot
-from numpy.linalg import norm
+    centroids=[np.mean(cur_spkids, axis=0) for cur_spkids in all_spkids]
+    predicts=[]
+    labels=[]
+    for ind, cur_spkids in tqdm(enumerate(all_spkids)):
+        for spkid in tqdm(cur_spkids):
+            for ind_cent, cent in enumerate(centroids):
+                score=cos_sim(spkid, cent)
+                if ind==ind_cent:
+                    label=1
+                else:
+                    label=0
+                predicts.append(score)
+                labels.append(label)
+elif mode=='new':
+    def get_spkid_relpath(p):
+        return '/'.join(p.split('/')[::2]).replace('wav', 'npy')
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--in_dir", type=str, required=True, help="input dir")
+    parser.add_argument("--test_list", type=str, required=True, help="the list of test wavs")
+    args = parser.parse_args()
 
-def cos_sim(a, b):
-    return dot(a, b) / (norm(a) * norm(b))
-
-centroids=[np.mean(cur_spkids, axis=0) for cur_spkids in all_spkids]
-predicts=[]
-labels=[]
-for ind, cur_spkids in tqdm(enumerate(all_spkids)):
-    for spkid in tqdm(cur_spkids):
-        for ind_cent, cent in enumerate(centroids):
-            score=cos_sim(spkid, cent)
-            if ind==ind_cent:
-                label=1
-            else:
-                label=0
-            predicts.append(score)
-            labels.append(label)
+    #assume all the spkid are generated and stored in this folder
+    spkid_folder=args.in_dir
+    test_file=args.test_list
+    predicts=[]
+    labels=[]
+    with open(test_file) as f:
+        for line in tqdm(f.readlines()):
+            line=line.strip()
+            if line=='':
+                continue
+            fields=line.split(' ')
+            labels.append(int(fields[0]))
+            fn1="%s/%s" % (spkid_folder, get_spkid_relpath(fields[1]))
+            fn2="%s/%s" % (spkid_folder, get_spkid_relpath(fields[2]))
+            #import pdb;pdb.set_trace()
+            spkid1=np.load(fn1)
+            spkid2=np.load(fn2)
+            predicts.append(cos_sim(spkid1, spkid2))
 
 #import numpy
 #import argparse
