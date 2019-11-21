@@ -39,7 +39,7 @@ horovod is not installed properly
 
 Solution:
 1. pip uninstall horovod
-2. HOROVOD_CUDA_INCLUDE=/usr/local/cuda-9.0/targets/x86_64-linux/include/ HOROVOD_CUDA_LIB=/usr/local/cuda-9.0/targets/x86_64-linux/lib/ HOROVOD_CUDA_HOME=/usr/local/cuda-9.0/bin/ HOROVOD_GPU_ALLREDUCE=NCCL HOROVOD_WITH_TENSORFLOW=1 pip install --no-cache-dir horovod
+2. HOROVOD_WITH_MPI=1 HOROVOD_CUDA_INCLUDE=/usr/local/cuda-9.0/targets/x86_64-linux/include/ HOROVOD_CUDA_LIB=/usr/local/cuda-9.0/targets/x86_64-linux/lib/ HOROVOD_CUDA_HOME=/usr/local/cuda-9.0/bin/ HOROVOD_GPU_ALLREDUCE=NCCL HOROVOD_WITH_TENSORFLOW=1 pip install --no-cache-dir horovod
 3. check: ldd /home/kailingtang/.virtualenvs/tacotron/lib/python3.5/site-packages/horovod/tensorflow/mpi_lib.cpython-35m-x86_64-linux-gnu.so
 
 

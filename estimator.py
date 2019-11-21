@@ -12,11 +12,11 @@ import argparse
 from glob import glob
 from tqdm import tqdm
 from tfrecord_producer import decode_single_preprocessed_data
-#import horovod.tensorflow as hvd
+import horovod.tensorflow as hvd
 
 single_predict=False
 
-#python estimator.py --in_dir ../datasets/tisv_pickles/ --ckpt test/ --gpu_str 4
+#python estimator.py --in_dir ../datasets/tisv_pickles/ --ckpt fastmodel2/ --gpu_str 8
 #python estimator.py --in_dir ../datasets/raw_vox/vox1/test/wav --out_dir new-spkid --ckpt fastmodel/ --gpu_str 8 --mode infer
 
 import pdb
@@ -626,6 +626,8 @@ class Trainer:
                                        30000000, 0.5, staircase=True)
             optimizer = tf.train.GradientDescentOptimizer(learning_rate * hvd.size() if self.hparams.use_horovod else learning_rate)
             optimizer = hvd.DistributedOptimizer(optimizer) if self.hparams.use_horovod else optimizer
+            if self.hparams.use_horovod:
+                print("=============%d %d %d===============" % (hvd.rank(), hvd.local_rank(), hvd.size()))
             #optimizer = tf.contrib.estimator.TowerOptimizer(optimizer)
             grads_and_vars = optimizer.compute_gradients(total_loss)
 
