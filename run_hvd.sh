@@ -10,6 +10,10 @@ cuda='0,1'
 in_dir='../datasets/tisv_pickles/'
 ckpt='ckpt'
 
+show_help(){
+    echo "./run_hvd.sh -n 2 -c 0,1 -i ../datasets/tisv_pickles -p ckpt"
+}
+
 while getopts "h?n:c:i:p:" opt; do
     case "$opt" in
     h|\?)
