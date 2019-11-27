@@ -12,12 +12,18 @@ import argparse
 from glob import glob
 from tqdm import tqdm
 from tfrecord_producer import decode_single_preprocessed_data
-import horovod.tensorflow as hvd
+#import horovod.tensorflow as hvd
 
 single_predict=False
 
 #python estimator.py --in_dir ../datasets/tisv_pickles/ --ckpt fastmodel2/ --gpu_str 8
 #python estimator.py --in_dir ../datasets/raw_vox/vox1/test/wav --out_dir new-spkid --ckpt fastmodel/ --gpu_str 8 --mode infer
+
+def normalize(v):
+    norm = np.linalg.norm(v)
+    if norm == 0:
+       return v
+    return v / norm
 
 import pdb
 import sys
@@ -689,14 +695,17 @@ class Trainer:
                     continue
                 dvectors=np.array([res['dvector'] for res in result])
                 mean_dvector=np.mean(dvectors, axis=0)
+                norm_mean_dvector=normalize(mean_dvector)
                 path_fields=wav_file.split('/')
                 spkid=path_fields[-3]
                 filename='%s.npy' % os.path.splitext(path_fields[-1])[0]
                 spk_dir='%s/%s' % (self.hparams.out_dir, spkid)
+                if self.hparams.in_place:
+                    spk_dir = "%s/spkid" % spk_dir
                 if not os.path.exists(spk_dir):
                     os.makedirs(spk_dir)
                 npy_save_path='%s/%s' % (spk_dir, filename)
-                np.save(npy_save_path, mean_dvector)
+                np.save(npy_save_path, norm_mean_dvector)
         #===== multi file per predict=====
         else:
             result=list(tts.predict(input_fn=self.get_input_fn()))
@@ -717,6 +726,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--in_dir", type=str, required=True, help="input data(pickle) dir")
 parser.add_argument("--out_dir", type=str, default='spkids', help="output data dir")
 parser.add_argument("--ckpt_dir", type=str, required=True, help="checkpoint to save/ start with for train/inference")
+parser.add_argument("--in_place", type=str, required=True, help="whether the spkid will be put in place")
 parser.add_argument("--mode", default="train", choices=["train", "test", "infer"], help="setting mode for execution")
 parser.add_argument('--data_types', nargs='+', default=['libri', 'vox1', 'vox2'])
 parser.add_argument('--pickle_dataset', action='store_true')
