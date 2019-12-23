@@ -193,7 +193,8 @@ class Trainer:
 
     def get_save_path_from_filename(self, wav_file):
         path_fields=wav_file.split('/')
-        spkid=path_fields[-3]
+        #spkid=path_fields[-3]
+        spkid='%s/%s' % (path_fields[-3], path_fields[-2])
         filename='%s.npy' % os.path.splitext(path_fields[-1])[0]
         spk_dir='%s/%s' % (self.hparams.out_dir, spkid)
         save_path='%s/%s' % (spk_dir, filename)

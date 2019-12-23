@@ -64,7 +64,8 @@ if mode=='old':
                 labels.append(label)
 elif mode=='new':
     def get_spkid_relpath(p):
-        return '/'.join(p.split('/')[::2]).replace('wav', 'npy')
+        #return '/'.join(p.split('/')[::2]).replace('wav', 'npy')
+        return p.replace('wav', 'npy')
     parser = argparse.ArgumentParser()
     parser.add_argument("--in_dir", type=str, required=True, help="input dir")
     parser.add_argument("--test_list", type=str, required=True, help="the list of test wavs")
