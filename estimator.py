@@ -15,6 +15,8 @@ from tfrecord_producer import decode_single_preprocessed_data
 #import horovod.tensorflow as hvd
 
 single_predict=False
+predict_limit=100
+calc_total_mean=True
 
 #python estimator.py --in_dir ../datasets/tisv_pickles/ --ckpt fastmodel2/ --gpu_str 8
 #python estimator.py --in_dir ../datasets/raw_vox/vox1/test/wav --out_dir new-spkid --ckpt fastmodel/ --gpu_str 8 --mode infer
@@ -683,6 +685,8 @@ class Trainer:
     def predict(self):
         #self.wav_list=glob('%s/*/Wave/*.wav' % self.hparams.in_dir)
         self.wav_list=glob('%s/**/*.wav' % self.hparams.in_dir, recursive=True)
+        if predict_limit>0:
+            self.wav_list=self.wav_list[:predict_limit]
         tts=tf.estimator.Estimator(model_fn=self.get_model_fn(), model_dir=self.hparams.ckpt_dir)
         print("Start predicing")
         #===== single file per predict=====
@@ -709,17 +713,26 @@ class Trainer:
                 np.save(npy_save_path, norm_mean_dvector)
         #===== multi file per predict=====
         else:
+            dvec_keeper=[]
             result=list(tts.predict(input_fn=self.get_input_fn()))
             dvectors=np.array([res['dvector'] for res in result])
             offset=0
             for key, fix_mel_len in zip(self.keys, self.fix_mel_lengths):
                 mean_dvector=np.mean(dvectors[offset:offset+fix_mel_len], axis=0)
                 offset+=fix_mel_len
-                npy_save_path=key
-                spk_dir=os.path.dirname(npy_save_path)
-                if not os.path.exists(spk_dir):
-                    os.makedirs(spk_dir)
-                np.save(npy_save_path, mean_dvector)
+                if calc_total_mean:
+                    dvec_keeper.append(mean_dvector)
+                else:
+                    npy_save_path=key
+                    spk_dir=os.path.dirname(npy_save_path)
+                    if not os.path.exists(spk_dir):
+                        os.makedirs(spk_dir)
+                    np.save(npy_save_path, mean_dvector)
+            if calc_total_mean:
+                mean_dvector=np.mean(dvec_keeper, axis=0)
+                if not os.path.exists(self.hparams.out_dir):
+                    os.makedirs(self.hparams.out_dir)
+                np.save('%s/need_to_rename.py' % self.hparams.out_dir, mean_dvector)
 
 parser = argparse.ArgumentParser()
 
@@ -727,7 +740,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--in_dir", type=str, required=True, help="input data(pickle) dir")
 parser.add_argument("--out_dir", type=str, default='spkids', help="output data dir")
 parser.add_argument("--ckpt_dir", type=str, required=True, help="checkpoint to save/ start with for train/inference")
-parser.add_argument("--in_place", type=str, required=True, help="whether the spkid will be put in place")
+parser.add_argument("--in_place", type=str, required=False, help="whether the spkid will be put in place")
 parser.add_argument("--mode", default="train", choices=["train", "test", "infer"], help="setting mode for execution")
 parser.add_argument('--data_types', nargs='+', default=['libri', 'vox1', 'vox2'])
 parser.add_argument('--pickle_dataset', action='store_true')
