@@ -256,7 +256,7 @@ class Trainer:
                 if len(wav_arr) == 0:
                     #return [],[],False
                     continue
-                wav_arr = np.pad(wav_arr, (0, max(0, 25840-len(wav_arr))), 'constant', constant_values=(0, 0))
+                wav_arr = np.pad(wav_arr, (0, max(0, sample_rate*(self.hparams.segment_length+0.015)-len(wav_arr))), 'constant', constant_values=(0, 0))
                 logmel_feats = logfbank(wav_arr, samplerate=sample_rate, nfilt=40)
 
                 total_len = logmel_feats.shape[0]
@@ -290,7 +290,7 @@ class Trainer:
                 if len(wav_arr) == 0:
                     #return [],[],False
                     continue
-                wav_arr = np.pad(wav_arr, (0, max(0, 25840-len(wav_arr))), 'constant', constant_values=(0, 0))
+                wav_arr = np.pad(wav_arr, (0, max(0, sample_rate*(self.hparams.segment_length+0.015)-len(wav_arr))), 'constant', constant_values=(0, 0))
                 logmel_feats = logfbank(wav_arr, samplerate=sample_rate, nfilt=40)
                 self.save_dict[wav_id] = logmel_feats
 

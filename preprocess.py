@@ -14,6 +14,7 @@ from python_speech_features import logfbank
 import vad_ex
 import webrtcvad
 
+#python preprocess.py --in_dir /home/zining/workspace/datasets/raw_vox/vox1/test/wav --pk_dir test_pk --data_type vox1 --segment_length 5
 
 """
 input dir
@@ -140,7 +141,7 @@ class Preprocess():
             with open(self.hparams.pk_dir + "/" + self.data_type + "/" + pickle_f_name, "wb") as f:
                 pickle.dump(save_dict, f, protocol=3);
         else:
-            print("wav length smaller than 1.6s: " + path)
+            print("wav length smaller than %fs: %s" % (self.hparams.segment_length, path))
 
 def main():
 
@@ -151,7 +152,7 @@ def main():
     # in_dir = ~/wav
     parser.add_argument("--in_dir", type=str, required=True, help="input audio data dir")
     parser.add_argument("--pk_dir", type=str, required=True, help="output pickle dir")
-    #parser.add_argument("--data_type", required=True, choices=["libri", "vox1", "vox2"])
+    parser.add_argument("--data_type", required=True, choices=["libri", "vox1", "vox2"])
 
     # Data Process
     parser.add_argument("--segment_length", type=float, default=1.6, help="segment length in seconds")
@@ -180,6 +181,8 @@ def main():
 
     #vox2_preprocess = Preprocess(args, "vox2")
     #vox2_preprocess.preprocess_data()
+    my_preprocess = Preprocess(args, args.data_type)
+    my_preprocess.preprocess_data()
 
 if __name__ == "__main__":
     main()
