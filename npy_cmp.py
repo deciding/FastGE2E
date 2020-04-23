@@ -4,10 +4,12 @@ import argparse
 from tqdm import tqdm
 from numpy import dot
 from numpy.linalg import norm
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 
 # python npy_cmp.py --in_dir new-spkid/ --test_list test_metas/veri_test2.txt
 # compare whether the two way(parallel) of generating spkid will produce the same result
-mode='old'
+mode='aishell'
 def cos_sim(a, b):
     return dot(a, b) / (norm(a) * norm(b))
 
@@ -89,6 +91,86 @@ elif mode=='new':
             spkid1=np.load(fn1)
             spkid2=np.load(fn2)
             predicts.append(cos_sim(spkid1, spkid2))
+
+elif mode=='aishell':
+    def get_spkid_relpath(s):
+        spkid=s[1:6]
+        return "%s/%s.npy" % (spkid, s)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-i", "--in_dir", type=str, help="input dir")
+    parser.add_argument("-t", "--test_list", type=str, help="the list of test wavs")
+    parser.add_argument("-r", "--res", type=str, help="result")
+    args = parser.parse_args()
+
+    #assume all the spkid are generated and stored in this folder
+    spkid_folder=args.in_dir
+    test_file=args.test_list
+    res_file=args.res
+    #predicts=[]
+    #labels=[]
+    n_jobs=40
+
+    def process_list(part_list, fn):
+        labels=[]
+        predicts=[]
+        for line in tqdm(part_list):
+            line=line.strip()
+            if line=='':
+                continue
+            fields=line.split(' ')
+            labels.append(int(fields[2]))
+            fn1="%s/%s" % (spkid_folder, get_spkid_relpath(fields[0]))
+            fn2="%s/%s" % (spkid_folder, get_spkid_relpath(fields[1]))
+            #import pdb;pdb.set_trace()
+            spkid1=np.load(fn1)
+            spkid2=np.load(fn2)
+            predicts.append(cos_sim(spkid1, spkid2))
+        with open(fn, 'w') as f:
+            for predict, label in zip(predicts, labels):
+                f.write("%f %d\n" % (predict, label))
+
+
+    import pdb;pdb.set_trace()
+    if spkid_folder and test_file:
+        with open(test_file) as f:
+            lines=f.readlines()
+
+        splitted_lines=[lines[i*5000:(i+1)*5000] for i in range(n_jobs)]
+        executor = ProcessPoolExecutor(max_workers=n_jobs)
+        futures_tuples=[]
+        futures=[]
+        for i, part_list in enumerate(splitted_lines):
+            futures.append(executor.submit(partial(
+                process_list, part_list, "tmp/out%d.txt" % i)))
+        futures_tuples.append([future.result() for future in tqdm(futures) if future.result() is not None])
+        exit()
+
+    elif res_file:
+        with open(res_file) as f:
+            predicts=[]
+            labels=[]
+            for line in f.readlines():
+                line=line.strip()
+                if line=='':
+                    continue
+                predict, label=line.split(' ')
+                predicts.append(float(predict))
+                labels.append(int(label))
+
+
+    #with open(test_file) as f:
+    #    for line in tqdm(f.readlines()[:1000]):
+    #        line=line.strip()
+    #        if line=='':
+    #            continue
+    #        fields=line.split(' ')
+    #        labels.append(int(fields[2]))
+    #        fn1="%s/%s" % (spkid_folder, get_spkid_relpath(fields[0]))
+    #        fn2="%s/%s" % (spkid_folder, get_spkid_relpath(fields[1]))
+    #        #import pdb;pdb.set_trace()
+    #        spkid1=np.load(fn1)
+    #        spkid2=np.load(fn2)
+    #        predicts.append(cos_sim(spkid1, spkid2))
 
 #import numpy
 #import argparse
